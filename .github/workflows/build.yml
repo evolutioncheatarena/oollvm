@@ -1,57 +1,108 @@
-name: Build Burri Protect
+name: Build OLLVM Clang 17 for Android NDK r29
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-  pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      LLVM_SRC_DIR: ${{ github.workspace }}/llvm-project
+      LLVM_BUILD_DIR: ${{ github.workspace }}/build-llvm
+      NDK_ZIP_URL: https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+      NDK_DIR: ${{ github.workspace }}/android-ndk-r29
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ninja-build \
-            cmake \
-            git \
-            zip \
-            unzip \
-            wget \
-            python3
+          sudo apt-get install -y cmake ninja-build git curl unzip zip
 
-      - name: Install Android NDK r29
+      - name: Clone llvm-project if missing
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+          if [ -d "${LLVM_SRC_DIR}" ]; then
+            echo "Found existing llvm-project at ${LLVM_SRC_DIR}"
+          else
+            git clone --depth 1 --branch llvmorg-17.0.6 https://github.com/llvm/llvm-project.git "${LLVM_SRC_DIR}"
+          fi
+
+      - name: Cache LLVM build directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_BUILD_DIR }}
+          key: ${{ runner.os }}-llvm17-build-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-llvm17-build-
+
+      - name: Configure LLVM
+        run: |
+          cmake -S "${LLVM_SRC_DIR}/llvm" -B "${LLVM_BUILD_DIR}" -G Ninja \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_TARGETS_TO_BUILD="AArch64;ARM;X86" \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TESTS=OFF \
+            -DLLVM_BUILD_EXAMPLES=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build clang and lld
+        run: |
+          cmake --build "${LLVM_BUILD_DIR}" --target clang lld -- -j"$(nproc)"
+
+      - name: Print compiler version
+        run: |
+          "${LLVM_BUILD_DIR}/bin/clang" --version
+
+      - name: Verify OLLVM flag support
+        run: |
+          "${LLVM_BUILD_DIR}/bin/clang" -mllvm -fla --version
+
+      - name: Download Android NDK r29
+        run: |
+          curl -L "${NDK_ZIP_URL}" -o android-ndk-r29-linux.zip
+
+      - name: Extract Android NDK r29
+        run: |
           unzip -q android-ndk-r29-linux.zip
-          mv android-ndk-r29 $HOME/android-ndk-r29
 
-      - name: Set NDK environment
+      - name: Replace NDK clang binaries
         run: |
-          echo "ANDROID_NDK_HOME=$HOME/android-ndk-r29" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$HOME/android-ndk-r29" >> $GITHUB_ENV
-          echo "NDK_HOME=$HOME/android-ndk-r29" >> $GITHUB_ENV
-          echo "$HOME/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          NDK_BIN="${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          install -m 0755 "${LLVM_BUILD_DIR}/bin/clang" "${NDK_BIN}/clang"
+          install -m 0755 "${LLVM_BUILD_DIR}/bin/clang++" "${NDK_BIN}/clang++"
 
-      - name: Build
+          if [ -f "${LLVM_BUILD_DIR}/bin/clang-17" ]; then
+            install -m 0755 "${LLVM_BUILD_DIR}/bin/clang-17" "${NDK_BIN}/clang-17"
+          else
+            install -m 0755 "${LLVM_BUILD_DIR}/bin/clang" "${NDK_BIN}/clang-17"
+          fi
+
+          if [ -f "${LLVM_BUILD_DIR}/bin/clang++-17" ]; then
+            install -m 0755 "${LLVM_BUILD_DIR}/bin/clang++-17" "${NDK_BIN}/clang++-17"
+          else
+            install -m 0755 "${LLVM_BUILD_DIR}/bin/clang++" "${NDK_BIN}/clang++-17"
+          fi
+
+      - name: Verify replaced NDK clang
         run: |
-          chmod +x build.sh
-          ./build.sh
+          "${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" -mllvm -fla --version
 
-      - name: Upload build artifacts
+      - name: Create modified NDK archive
+        run: |
+          zip -qry android-ndk-r29-ollvm.zip android-ndk-r29
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: burri_protect
-          path: |
-            **/*.so
-            **/*.a
-            **/*.bin
-            **/build/**
+          name: android-ndk-r29-ollvm
+          path: android-ndk-r29-ollvm.zip
+          if-no-files-found: error
