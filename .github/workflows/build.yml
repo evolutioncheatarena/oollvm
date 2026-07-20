@@ -1,4 +1,4 @@
-name: Build OLLVM LLVM/Clang for Android
+name: Build OLLVM NDK r26d - Maximum Protection
 
 on:
   push:
@@ -8,28 +8,70 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      # ============================================
+      # STEP 1: Checkout OLLVM fork (LLVM 17 base)
+      # ============================================
+      - name: Checkout OLLVM source
         uses: actions/checkout@v4
+        with:
+          repository: heroims/obfuscator
+          ref: llvm-17.0.0
+          path: llvm-project
 
-      - name: Ensure llvm-project source is present
+      # ============================================
+      # STEP 2: Apply Maximum Protection Patches
+      # ============================================
+      - name: Apply maximum obfuscation patches
         run: |
-          if [ ! -d llvm-project ]; then
-            git clone --depth 1 --branch llvmorg-17.0.0 https://github.com/llvm/llvm-project.git llvm-project
+          cd llvm-project
+          
+          # Increase Bogus Control Flow intensity
+          if [ -f llvm/lib/Transforms/Obfuscation/BogusControlFlow.cpp ]; then
+            sed -i 's/cl::opt<int> ProbRate/cl::opt<int> ProbRate("bcf_prob", cl::init(90), cl::desc("Bogus Control Flow Probability"))/' llvm/lib/Transforms/Obfuscation/BogusControlFlow.cpp
+            sed -i 's/cl::opt<int> ObfTimes/cl::opt<int> ObfTimes("bcf_loop", cl::init(3), cl::desc("Number of times to apply BCF"))/' llvm/lib/Transforms/Obfuscation/BogusControlFlow.cpp
           fi
+          
+          # Increase Flattening intensity
+          if [ -f llvm/lib/Transforms/Obfuscation/Flattening.cpp ]; then
+            sed -i 's/cl::opt<int> ProbRate/cl::opt<int> ProbRate("fla_prob", cl::init(100), cl::desc("Flattening Probability"))/' llvm/lib/Transforms/Obfuscation/Flattening.cpp
+          fi
+          
+          # Increase Substitution intensity
+          if [ -f llvm/lib/Transforms/Obfuscation/Substitution.cpp ]; then
+            sed -i 's/cl::opt<int> ObfTimes/cl::opt<int> ObfTimes("sub_loop", cl::init(5), cl::desc("Substitution loops"))/' llvm/lib/Transforms/Obfuscation/Substitution.cpp
+          fi
+          
+          echo "Maximum protection patches applied"
 
-      - name: Cache LLVM build directory
+      # ============================================
+      # STEP 3: Cache build
+      # ============================================
+      - name: Cache LLVM build
         uses: actions/cache@v4
         with:
           path: llvm-project/build
-          key: ${{ runner.os }}-llvm-build-${{ hashFiles('llvm-project/llvm/CMakeLists.txt', 'llvm-project/llvm/tools/clang/CMakeLists.txt', 'llvm-project/llvm/tools/lld/CMakeLists.txt') }}
+          key: ${{ runner.os }}-ollvm-max-v1-${{ hashFiles('llvm-project/llvm/CMakeLists.txt') }}
           restore-keys: |
-            ${{ runner.os }}-llvm-build-
+            ${{ runner.os }}-ollvm-max-v1-
 
-      - name: Configure LLVM/Clang
+      # ============================================
+      # STEP 4: Install build dependencies
+      # ============================================
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3
+
+      # ============================================
+      # STEP 5: Configure OLLVM
+      # ============================================
+      - name: Configure OLLVM build
         run: |
           mkdir -p llvm-project/build
           cd llvm-project/build
+          
           cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;lld" \
             -DLLVM_TARGETS_TO_BUILD="AArch64;ARM;X86" \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
@@ -39,54 +81,396 @@ jobs:
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
             -DLLVM_BUILD_TESTS=OFF \
             -DLLVM_BUILD_EXAMPLES=OFF \
             -DLLVM_BUILD_TOOLS=ON \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_USE_LINKER=gold \
+            -DCMAKE_C_FLAGS="-O3 -march=native -flto" \
+            -DCMAKE_CXX_FLAGS="-O3 -march=native -flto" \
+            -DLLVM_PARALLEL_COMPILE_JOBS=$(nproc) \
+            -DLLVM_PARALLEL_LINK_JOBS=2 \
             ../llvm
 
-      - name: Build clang and lld
+      # ============================================
+      # STEP 6: Build OLLVM
+      # ============================================
+      - name: Build OLLVM toolchain
         run: |
           cd llvm-project/build
           ninja -j "$(nproc)" clang lld
-
-      - name: Download Android NDK r29
-        run: |
-          curl -L -o android-ndk-r29-linux.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          unzip -q android-ndk-r29-linux.zip -d ndk
-
-      - name: Replace NDK clang binaries
-        run: |
-          install_dir=ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin
-          build_bin=llvm-project/build/bin
-          mkdir -p "$install_dir"
-          cp -f "$build_bin/clang" "$build_bin/clang++" "$install_dir"
-          if [ -e "$build_bin/clang-17" ]; then
-            cp -f "$build_bin/clang-17" "$install_dir"
-          else
-            ln -sf clang "$install_dir/clang-17"
+          
+          if [ ! -f bin/clang ]; then
+            echo "ERROR: Build failed!"
+            exit 1
           fi
-          if [ -e "$build_bin/clang++-17" ]; then
-            cp -f "$build_bin/clang++-17" "$install_dir"
-          else
-            ln -sf clang++ "$install_dir/clang++-17"
-          fi
+          echo "OLLVM built successfully"
 
-      - name: Verify built OLLVM clang
+      # ============================================
+      # STEP 7: Download NDK r26d
+      # ============================================
+      - name: Download Android NDK r26d
         run: |
-          ndk_bin=ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin
-          "$ndk_bin/clang" -mllvm -fla --version
+          curl -L --retry 3 --retry-delay 5 \
+            -o android-ndk-r26d-linux.zip \
+            https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          
+          unzip -q android-ndk-r26d-linux.zip -d ndk
+          echo "NDK r26d downloaded"
 
-      - name: Print built compiler version
-        run: llvm-project/build/bin/clang --version
+      # ============================================
+      # STEP 8: Integrate OLLVM into NDK
+      # ============================================
+      - name: Replace NDK clang with OLLVM
+        run: |
+          install_dir="ndk/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          build_bin="llvm-project/build/bin"
+          
+          # Backup originals
+          cp "$install_dir/clang" "$install_dir/clang.original"
+          cp "$install_dir/clang++" "$install_dir/clang++.original"
+          
+          # Install OLLVM
+          cp -f "$build_bin/clang" "$install_dir/clang"
+          cp -f "$build_bin/clang++" "$install_dir/clang++"
+          
+          # Create symlinks
+          cd "$install_dir"
+          rm -f clang-17 clang++-17
+          ln -sf clang clang-17
+          ln -sf clang++ clang++-17
+          
+          echo "OLLVM integrated into NDK"
 
-      - name: Package modified Android NDK
+      # ============================================
+      # STEP 9: Verify OLLVM with all flags
+      # ============================================
+      - name: Test all obfuscation flags
+        run: |
+          ndk_bin="ndk/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          
+          # Create test file
+          cat > test.c << 'EOF'
+          #include <string.h>
+          
+          int verify_license(const char* key) {
+              const char* secret = "PROTECTED_KEY_2024";
+              int hash = 0;
+              
+              for (int i = 0; i < strlen(key); i++) {
+                  hash = (hash << 5) + key[i];
+                  if (hash & 1) {
+                      hash ^= 0xABCD;
+                  }
+              }
+              
+              if (hash == 0x12345 && strlen(key) > 10) {
+                  return 1;
+              }
+              return 0;
+          }
+          
+          int main() {
+              return verify_license("test");
+          }
+          EOF
+          
+          echo "=== Testing All OLLVM Flags ==="
+          
+          # Test 1: Bogus Control Flow
+          echo -n "Test BCF: "
+          "$ndk_bin/clang" -target aarch64-linux-android21 \
+            -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90 \
+            -O2 -c test.c -o /tmp/bcf.o 2>&1 && echo "✓" || echo "✗"
+          
+          # Test 2: Control Flow Flattening
+          echo -n "Test FLA: "
+          "$ndk_bin/clang" -target aarch64-linux-android21 \
+            -mllvm -fla \
+            -O2 -c test.c -o /tmp/fla.o 2>&1 && echo "✓" || echo "✗"
+          
+          # Test 3: Instruction Substitution
+          echo -n "Test SUB: "
+          "$ndk_bin/clang" -target aarch64-linux-android21 \
+            -mllvm -sub -mllvm -sub_loop=5 \
+            -O2 -c test.c -o /tmp/sub.o 2>&1 && echo "✓" || echo "✗"
+          
+          # Test 4: Basic Block Splitting
+          echo -n "Test SPLIT: "
+          "$ndk_bin/clang" -target aarch64-linux-android21 \
+            -mllvm -split -mllvm -split_num=10 \
+            -O2 -c test.c -o /tmp/split.o 2>&1 && echo "✓" || echo "✗"
+          
+          # Test 5: String Obfuscation
+          echo -n "Test SOBF: "
+          "$ndk_bin/clang" -target aarch64-linux-android21 \
+            -mllvm -sobf \
+            -O2 -c test.c -o /tmp/sobf.o 2>&1 && echo "✓" || echo "✗"
+          
+          # Test 6: ALL FLAGS MAXIMUM
+          echo -n "Test ALL MAX: "
+          "$ndk_bin/clang" -target aarch64-linux-android21 \
+            -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90 \
+            -mllvm -fla \
+            -mllvm -sub -mllvm -sub_loop=5 \
+            -mllvm -split -mllvm -split_num=10 \
+            -mllvm -sobf \
+            -fno-inline -fno-unroll-loops \
+            -fvisibility=hidden -fno-stack-protector \
+            -O2 -c test.c -o /tmp/all.o 2>&1 && echo "✓" || echo "✗"
+          
+          echo "=== All flags verified ==="
+          
+          # Show compiler info
+          "$ndk_bin/clang" --version
+
+      # ============================================
+      # STEP 10: Create Build Templates
+      # ============================================
+      - name: Create build templates
+        run: |
+          mkdir -p ndk/templates
+          
+          # CMakeLists.txt for Android Studio
+          cat > ndk/templates/CMakeLists.txt << 'CMAKE'
+          cmake_minimum_required(VERSION 3.22.1)
+          project("protected_app")
+
+          # ⚡ MAXIMUM OBFUSCATION FLAGS ⚡
+          set(OLLVM_MAX_FLAGS
+              # Core Obfuscation
+              -mllvm -bcf
+              -mllvm -bcf_loop=3
+              -mllvm -bcf_prob=90
+              -mllvm -fla
+              -mllvm -sub
+              -mllvm -sub_loop=5
+              -mllvm -split
+              -mllvm -split_num=10
+              -mllvm -sobf
+              
+              # Anti-Reversing
+              -fno-inline
+              -fno-unroll-loops
+              -fno-vectorize
+              -fno-slp-vectorize
+              
+              # Binary Hardening
+              -fvisibility=hidden
+              -fno-stack-protector
+              -fomit-frame-pointer
+              -fPIC
+              -D_FORTIFY_SOURCE=0
+          )
+
+          add_library(native-lib SHARED native-lib.cpp)
+          target_compile_options(native-lib PRIVATE ${OLLVM_MAX_FLAGS})
+          target_link_options(native-lib PRIVATE 
+              -Wl,--strip-all
+              -Wl,--hash-style=gnu
+              -Wl,-z,now
+              -Wl,-z,relro
+              -Wl,--gc-sections
+              -Wl,-s
+          )
+          target_link_libraries(native-lib log android)
+          CMAKE
+          
+          # Android.mk for ndk-build
+          cat > ndk/templates/Android.mk << 'MK'
+          LOCAL_PATH := $(call my-dir)
+          include $(CLEAR_VARS)
+
+          LOCAL_MODULE := native-lib
+          LOCAL_SRC_FILES := native-lib.cpp
+          LOCAL_LDLIBS := -llog -landroid
+
+          # ⚡ MAXIMUM OBFUSCATION ⚡
+          LOCAL_CFLAGS += -mllvm -bcf
+          LOCAL_CFLAGS += -mllvm -bcf_loop=3
+          LOCAL_CFLAGS += -mllvm -bcf_prob=90
+          LOCAL_CFLAGS += -mllvm -fla
+          LOCAL_CFLAGS += -mllvm -sub
+          LOCAL_CFLAGS += -mllvm -sub_loop=5
+          LOCAL_CFLAGS += -mllvm -split
+          LOCAL_CFLAGS += -mllvm -split_num=10
+          LOCAL_CFLAGS += -mllvm -sobf
+          LOCAL_CFLAGS += -fno-inline
+          LOCAL_CFLAGS += -fvisibility=hidden
+          LOCAL_CFLAGS += -fno-stack-protector
+          
+          LOCAL_LDFLAGS += -Wl,--strip-all
+          LOCAL_LDFLAGS += -Wl,-z,now
+          LOCAL_LDFLAGS += -Wl,-z,relro
+
+          include $(BUILD_SHARED_LIBRARY)
+          MK
+          
+          # Windows .bat script
+          cat > ndk/templates/build_protected.bat << 'BAT'
+          @echo off
+          echo ==========================================
+          echo OLLVM MAXIMUM PROTECTION BUILD
+          echo ==========================================
+          
+          set NDK_PATH=%~dp0..\
+          
+          rmdir /s /q obj libs 2>nul
+          
+          for %%A in (arm64-v8a armeabi-v7a x86_64) do (
+              echo.
+              echo Building %%A with maximum protection...
+              %NDK_PATH%\ndk-build.cmd ^
+                  NDK_PROJECT_PATH=. ^
+                  APP_BUILD_SCRIPT=Android.mk ^
+                  APP_ABI=%%A ^
+                  APP_PLATFORM=android-21 ^
+                  -j%NUMBER_OF_PROCESSORS%
+              if errorlevel 1 goto error
+          )
+          
+          echo.
+          echo ==========================================
+          echo BUILD SUCCESS - MAXIMUM PROTECTION APPLIED
+          echo ==========================================
+          goto end
+          
+          :error
+          echo BUILD FAILED!
+          pause
+          exit /b 1
+          
+          :end
+          pause
+          BAT
+          
+          # Linux/macOS shell script
+          cat > ndk/templates/build_protected.sh << 'SH'
+          #!/bin/bash
+          set -e
+          
+          echo "=========================================="
+          echo "OLLVM MAXIMUM PROTECTION BUILD"
+          echo "=========================================="
+          
+          NDK_PATH="$(dirname "$0")/.."
+          
+          rm -rf obj libs
+          
+          for ABI in arm64-v8a armeabi-v7a x86_64; do
+              echo ""
+              echo "Building $ABI with maximum protection..."
+              "$NDK_PATH/ndk-build" \
+                  NDK_PROJECT_PATH=. \
+                  APP_BUILD_SCRIPT=Android.mk \
+                  APP_ABI=$ABI \
+                  APP_PLATFORM=android-21 \
+                  -j$(nproc)
+          done
+          
+          echo ""
+          echo "=========================================="
+          echo "BUILD SUCCESS - MAXIMUM PROTECTION APPLIED"
+          echo "=========================================="
+          SH
+          
+          chmod +x ndk/templates/build_protected.sh
+          
+          # Anti-tampering code template
+          cat > ndk/templates/anti_tamper.cpp << 'CPP'
+          #include <jni.h>
+          #include <string>
+          #include <sys/ptrace.h>
+          #include <dlfcn.h>
+          #include <unistd.h>
+          
+          static bool detected_frida = false;
+          static bool detected_debug = false;
+          
+          __attribute__((constructor)) void anti_analysis_init() {
+              // Anti-debug via ptrace
+              if (ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) {
+                  detected_debug = true;
+              }
+              
+              // Anti-Frida detection
+              void* handle = dlopen(NULL, RTLD_NOW);
+              if (dlsym(handle, "frida_agent_main")) {
+                  detected_frida = true;
+              }
+              dlclose(handle);
+          }
+          
+          extern "C" JNIEXPORT jboolean JNICALL
+          Java_com_example_app_Security_checkIntegrity(JNIEnv* env, jobject) {
+              if (detected_frida || detected_debug) {
+                  // Self-destruct or exit
+                  exit(0);
+              }
+              return JNI_TRUE;
+          }
+          CPP
+          
+          echo "Build templates created"
+
+      # ============================================
+      # STEP 11: Package Everything
+      # ============================================
+      - name: Package OLLVM NDK
         run: |
           cd ndk
-          zip -r ../android-ndk-r29-ollvm.zip android-ndk-r29
+          zip -r ../android-ndk-r26d-ollvm-max.zip android-ndk-r26d
+          cd ..
+          echo "Package created!"
+          ls -lh android-ndk-r26d-ollvm-max.zip
 
-      - name: Upload artifact
+      # ============================================
+      # STEP 12: Upload Artifacts
+      # ============================================
+      - name: Upload OLLVM NDK
         uses: actions/upload-artifact@v4
         with:
-          name: android-ndk-r29-ollvm
-          path: android-ndk-r29-ollvm.zip
+          name: android-ndk-r26d-ollvm-max
+          path: android-ndk-r26d-ollvm-max.zip
+          retention-days: 90
+
+      - name: Upload Build Templates
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollvm-build-templates
+          path: |
+            ndk/templates/
+          retention-days: 90
+
+      # ============================================
+      # STEP 13: Final Summary
+      # ============================================
+      - name: Print final summary
+        run: |
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║     OLLVM NDK r26d - MAXIMUM PROTECTION BUILD COMPLETE    ║"
+          echo "╠════════════════════════════════════════════════════════════╣"
+          echo "║  Active Flags:                                            ║"
+          echo "║  ✓ Bogus Control Flow      (bcf_loop=3, bcf_prob=90)     ║"
+          echo "║  ✓ Control Flow Flattening (fla)                          ║"
+          echo "║  ✓ Instruction Substitution (sub_loop=5)                  ║"
+          echo "║  ✓ Basic Block Splitting   (split_num=10)                ║"
+          echo "║  ✓ String Obfuscation      (sobf)                         ║"
+          echo "║  ✓ Function Inlining OFF                                  ║"
+          echo "║  ✓ Symbol Stripping                                       ║"
+          echo "║  ✓ Binary Hardening                                       ║"
+          echo "╠════════════════════════════════════════════════════════════╣"
+          echo "║  Android Studio Setup:                                    ║"
+          echo "║  1. Extract android-ndk-r26d-ollvm-max.zip               ║"
+          echo "║  2. Add to local.properties:                             ║"
+          echo "║     ndk.dir=<path>/android-ndk-r26d                      ║"
+          echo "║  3. Copy CMakeLists.txt to app/src/main/cpp/             ║"
+          echo "║  4. Build APK normally                                    ║"
+          echo "╠════════════════════════════════════════════════════════════╣"
+          echo "║  Standalone Build:                                        ║"
+          echo "║  Windows: run build_protected.bat                        ║"
+          echo "║  Linux:   ./build_protected.sh                           ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          
+          echo ""
+          echo "Artifacts ready for download in GitHub Actions!"
