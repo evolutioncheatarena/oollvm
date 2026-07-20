@@ -7,11 +7,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
     steps:
       # ============================================
       # STEP 1: Checkout LLVM 17.0.6 official
       # ============================================
-      - name: Checkout LLVM 17.0.6 official
+      - name: Checkout LLVM 17.0.6
         uses: actions/checkout@v4
         with:
           repository: llvm/llvm-project
@@ -19,20 +21,19 @@ jobs:
           path: llvm-project
 
       # ============================================
-      # STEP 2: Apply OLLVM passes
+      # STEP 2: Create OLLVM passes
       # ============================================
-      - name: Create OLLVM passes
+      - name: Create OLLVM obfuscation passes
         run: |
           cd llvm-project
           
-          # Create directories
           mkdir -p llvm/lib/Transforms/Obfuscation
           mkdir -p llvm/include/llvm/Transforms/Obfuscation
           
           # ==========================================
           # BogusControlFlow.h
           # ==========================================
-          cat > llvm/include/llvm/Transforms/Obfuscation/BogusControlFlow.h << 'EOF'
+          cat > llvm/include/llvm/Transforms/Obfuscation/BogusControlFlow.h << 'HEADER'
           #ifndef LLVM_TRANSFORMS_OBFUSCATION_BOGUSCONTROLFLOW_H
           #define LLVM_TRANSFORMS_OBFUSCATION_BOGUSCONTROLFLOW_H
           #include "llvm/IR/PassManager.h"
@@ -42,19 +43,19 @@ jobs:
             PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
             static bool isRequired() { return true; }
           };
-          } // namespace llvm
+          }
           #endif
-          EOF
+          HEADER
           
           # ==========================================
           # BogusControlFlow.cpp
           # ==========================================
-          cat > llvm/lib/Transforms/Obfuscation/BogusControlFlow.cpp << 'EOF'
+          cat > llvm/lib/Transforms/Obfuscation/BogusControlFlow.cpp << 'CPP'
           #include "llvm/Transforms/Obfuscation/BogusControlFlow.h"
           #include "llvm/IR/IRBuilder.h"
           #include "llvm/IR/Instructions.h"
-          #include "llvm/Transforms/Utils/BasicBlockUtils.h"
           #include "llvm/Support/CommandLine.h"
+          #include "llvm/Support/RandomNumberGenerator.h"
           #include <random>
           
           using namespace llvm;
@@ -63,7 +64,8 @@ jobs:
           static cl::opt<int> BCFLoop("bcf_loop", cl::init(3), cl::desc("BCF number of loops"));
           
           PreservedAnalyses BogusControlFlow::run(Function &F, FunctionAnalysisManager &AM) {
-              if (F.isDeclaration() || F.empty()) return PreservedAnalyses::all();
+              if (F.isDeclaration() || F.empty())
+                  return PreservedAnalyses::all();
               
               std::random_device rd;
               std::mt19937 gen(rd());
@@ -71,24 +73,24 @@ jobs:
               
               std::vector<BasicBlock*> blocks;
               for (BasicBlock &BB : F) {
-                  if (!BB.isEntryBlock()) blocks.push_back(&BB);
+                  if (!BB.isEntryBlock())
+                      blocks.push_back(&BB);
               }
               
               for (BasicBlock *BB : blocks) {
-                  if (dist(gen) > BCFProb) continue;
+                  if (dist(gen) > BCFProb)
+                      continue;
                   
                   for (int i = 0; i < BCFLoop; i++) {
                       BasicBlock *BogusBB = BasicBlock::Create(F.getContext(), "bcf_block", &F);
                       IRBuilder<> BogusBuilder(BogusBB);
                       
-                      // Add junk arithmetic
                       Value *R1 = BogusBuilder.getInt32(rand() % 1000);
                       Value *R2 = BogusBuilder.getInt32(rand() % 1000);
                       Value *Junk1 = BogusBuilder.CreateAdd(R1, R2, "junk_add");
                       Value *Junk2 = BogusBuilder.CreateMul(Junk1, R1, "junk_mul");
                       Value *Junk3 = BogusBuilder.CreateXor(Junk2, R2, "junk_xor");
                       
-                      // Create opaque predicate (always true)
                       Value *X = BogusBuilder.getInt32(0x55555555);
                       Value *Y = BogusBuilder.getInt32(0xAAAAAAAA);
                       Value *Z = BogusBuilder.CreateOr(X, Y, "pred_or");
@@ -96,23 +98,16 @@ jobs:
                       Value *Pred = BogusBuilder.CreateICmpEQ(Z, W, "pred_cmp");
                       
                       BogusBuilder.CreateCondBr(Pred, BB, BogusBB);
-                      
-                      // Update original block's predecessors
-                      for (auto *PredBB : predecessors(BB)) {
-                          if (PredBB != BogusBB) {
-                              PredBB->getTerminator()->replaceSuccessorWith(BB, BogusBB);
-                          }
-                      }
                   }
               }
               return PreservedAnalyses::none();
           }
-          EOF
+          CPP
           
           # ==========================================
           # Flattening.h
           # ==========================================
-          cat > llvm/include/llvm/Transforms/Obfuscation/Flattening.h << 'EOF'
+          cat > llvm/include/llvm/Transforms/Obfuscation/Flattening.h << 'HEADER'
           #ifndef LLVM_TRANSFORMS_OBFUSCATION_FLATTENING_H
           #define LLVM_TRANSFORMS_OBFUSCATION_FLATTENING_H
           #include "llvm/IR/PassManager.h"
@@ -122,88 +117,80 @@ jobs:
             PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
             static bool isRequired() { return true; }
           };
-          } // namespace llvm
+          }
           #endif
-          EOF
+          HEADER
           
           # ==========================================
           # Flattening.cpp
           # ==========================================
-          cat > llvm/lib/Transforms/Obfuscation/Flattening.cpp << 'EOF'
+          cat > llvm/lib/Transforms/Obfuscation/Flattening.cpp << 'CPP'
           #include "llvm/Transforms/Obfuscation/Flattening.h"
           #include "llvm/IR/IRBuilder.h"
           #include "llvm/IR/Instructions.h"
           #include "llvm/Support/CommandLine.h"
-          #include "llvm/Transforms/Utils/Local.h"
+          #include <random>
           
           using namespace llvm;
           
           static cl::opt<int> FLAProb("fla_prob", cl::init(100), cl::desc("FLA probability (0-100)"));
           
           PreservedAnalyses Flattening::run(Function &F, FunctionAnalysisManager &AM) {
-              if (F.isDeclaration() || F.size() <= 2) return PreservedAnalyses::all();
+              if (F.isDeclaration() || F.size() <= 2)
+                  return PreservedAnalyses::all();
               
               std::random_device rd;
               std::mt19937 gen(rd());
               std::uniform_int_distribution<> dist(0, 100);
               
-              if (dist(gen) > FLAProb) return PreservedAnalyses::all();
-              
-              // Collect all original blocks except entry
-              std::vector<BasicBlock*> OrigBlocks;
-              for (BasicBlock &BB : F) {
-                  if (&BB != &F.getEntryBlock()) OrigBlocks.push_back(&BB);
-              }
-              
-              if (OrigBlocks.empty()) return PreservedAnalyses::all();
+              if (dist(gen) > FLAProb)
+                  return PreservedAnalyses::all();
               
               BasicBlock *Entry = &F.getEntryBlock();
               BasicBlock *Dispatcher = BasicBlock::Create(F.getContext(), "fla_dispatch", &F);
-              BasicBlock *ReturnBB = BasicBlock::Create(F.getContext(), "fla_return", &F);
               
               IRBuilder<> Builder(Dispatcher);
               AllocaInst *SwitchVar = Builder.CreateAlloca(Builder.getInt32Ty(), nullptr, "fla_switch");
               Builder.CreateStore(Builder.getInt32(0), SwitchVar);
               
-              LoadInst *LoadVar = Builder.CreateLoad(Builder.getInt32Ty(), SwitchVar, "fla_load");
-              SwitchInst *Sw = Builder.CreateSwitch(LoadVar, ReturnBB, OrigBlocks.size());
+              std::vector<BasicBlock*> blocks;
+              for (BasicBlock &BB : F) {
+                  if (&BB != Entry && &BB != Dispatcher)
+                      blocks.push_back(&BB);
+              }
               
-              // Assign each block a case number and update terminator
-              int caseNum = 1;
-              for (BasicBlock *BB : OrigBlocks) {
-                  Sw->addCase(Builder.getInt32(caseNum), BB);
+              LoadInst *LoadVar = Builder.CreateLoad(Builder.getInt32Ty(), SwitchVar, "fla_load");
+              SwitchInst *Sw = Builder.CreateSwitch(LoadVar, Dispatcher, blocks.size());
+              
+              int idx = 1;
+              for (BasicBlock *BB : blocks) {
+                  Sw->addCase(Builder.getInt32(idx), BB);
                   
-                  // Update block's terminator to set switch var and branch to dispatcher
                   IRBuilder<> BBBuilder(BB);
                   if (BB->getTerminator()) {
                       BBBuilder.SetInsertPoint(BB->getTerminator());
-                  }
-                  BBBuilder.CreateStore(Builder.getInt32(caseNum + 1), SwitchVar);
-                  BBBuilder.CreateBr(Dispatcher);
-                  
-                  // Remove old terminator if it exists
-                  if (BB->getTerminator() != BBBuilder.GetInsertPoint()) {
                       BB->getTerminator()->eraseFromParent();
                   }
                   
-                  caseNum++;
+                  int nextIdx = (idx % blocks.size()) + 1;
+                  BBBuilder.CreateStore(Builder.getInt32(nextIdx), SwitchVar);
+                  BBBuilder.CreateBr(Dispatcher);
+                  idx++;
               }
               
-              // Entry block jumps to dispatcher
-              Entry->getTerminator()->replaceSuccessorWith(&F.getEntryBlock(), Dispatcher);
-              
-              // Return block
-              IRBuilder<> RetBuilder(ReturnBB);
-              RetBuilder.CreateRet(RetBuilder.getInt32(0));
+              Entry->getTerminator()->eraseFromParent();
+              IRBuilder<> EntryBuilder(Entry);
+              EntryBuilder.CreateStore(Builder.getInt32(1), SwitchVar);
+              EntryBuilder.CreateBr(Dispatcher);
               
               return PreservedAnalyses::none();
           }
-          EOF
+          CPP
           
           # ==========================================
           # Substitution.h
           # ==========================================
-          cat > llvm/include/llvm/Transforms/Obfuscation/Substitution.h << 'EOF'
+          cat > llvm/include/llvm/Transforms/Obfuscation/Substitution.h << 'HEADER'
           #ifndef LLVM_TRANSFORMS_OBFUSCATION_SUBSTITUTION_H
           #define LLVM_TRANSFORMS_OBFUSCATION_SUBSTITUTION_H
           #include "llvm/IR/PassManager.h"
@@ -213,14 +200,14 @@ jobs:
             PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
             static bool isRequired() { return true; }
           };
-          } // namespace llvm
+          }
           #endif
-          EOF
+          HEADER
           
           # ==========================================
           # Substitution.cpp
           # ==========================================
-          cat > llvm/lib/Transforms/Obfuscation/Substitution.cpp << 'EOF'
+          cat > llvm/lib/Transforms/Obfuscation/Substitution.cpp << 'CPP'
           #include "llvm/Transforms/Obfuscation/Substitution.h"
           #include "llvm/IR/IRBuilder.h"
           #include "llvm/IR/Instructions.h"
@@ -231,76 +218,64 @@ jobs:
           static cl::opt<int> SubLoop("sub_loop", cl::init(5), cl::desc("SUB number of loops"));
           
           PreservedAnalyses Substitution::run(Function &F, FunctionAnalysisManager &AM) {
-              if (F.isDeclaration()) return PreservedAnalyses::all();
+              if (F.isDeclaration())
+                  return PreservedAnalyses::all();
               
               for (int iter = 0; iter < SubLoop; iter++) {
                   for (BasicBlock &BB : F) {
-                      std::vector<Instruction*> toReplace;
+                      std::vector<BinaryOperator*> toReplace;
                       for (Instruction &I : BB) {
                           if (BinaryOperator *BO = dyn_cast<BinaryOperator>(&I)) {
                               toReplace.push_back(BO);
                           }
                       }
                       
-                      for (Instruction *I : toReplace) {
-                          BinaryOperator *BO = cast<BinaryOperator>(I);
+                      for (BinaryOperator *BO : toReplace) {
                           IRBuilder<> Builder(BO);
                           
-                          switch (BO->getOpcode()) {
-                              case Instruction::Add: {
-                                  // a + b = a - (-b)
-                                  Value *Neg = Builder.CreateNeg(BO->getOperand(1));
-                                  Value *Sub = Builder.CreateSub(BO->getOperand(0), Neg);
-                                  BO->replaceAllUsesWith(Sub);
-                                  break;
-                              }
-                              case Instruction::Sub: {
-                                  // a - b = a + (-b)
-                                  Value *Neg = Builder.CreateNeg(BO->getOperand(1));
-                                  Value *Add = Builder.CreateAdd(BO->getOperand(0), Neg);
-                                  BO->replaceAllUsesWith(Add);
-                                  break;
-                              }
-                              case Instruction::And: {
-                                  // a & b = ~(~a | ~b)
-                                  Value *NotA = Builder.CreateNot(BO->getOperand(0));
-                                  Value *NotB = Builder.CreateNot(BO->getOperand(1));
-                                  Value *Or = Builder.CreateOr(NotA, NotB);
-                                  Value *Not = Builder.CreateNot(Or);
-                                  BO->replaceAllUsesWith(Not);
-                                  break;
-                              }
-                              case Instruction::Or: {
-                                  // a | b = ~(~a & ~b)
-                                  Value *NotA = Builder.CreateNot(BO->getOperand(0));
-                                  Value *NotB = Builder.CreateNot(BO->getOperand(1));
-                                  Value *And = Builder.CreateAnd(NotA, NotB);
-                                  Value *Not = Builder.CreateNot(And);
-                                  BO->replaceAllUsesWith(Not);
-                                  break;
-                              }
-                              case Instruction::Xor: {
-                                  // a ^ b = (~a & b) | (a & ~b)
-                                  Value *NotA = Builder.CreateNot(BO->getOperand(0));
-                                  Value *NotB = Builder.CreateNot(BO->getOperand(1));
-                                  Value *And1 = Builder.CreateAnd(NotA, BO->getOperand(1));
-                                  Value *And2 = Builder.CreateAnd(BO->getOperand(0), NotB);
-                                  Value *Or = Builder.CreateOr(And1, And2);
-                                  BO->replaceAllUsesWith(Or);
-                                  break;
-                              }
+                          if (BO->getOpcode() == Instruction::Add) {
+                              Value *Neg = Builder.CreateNeg(BO->getOperand(1));
+                              Value *Sub = Builder.CreateSub(BO->getOperand(0), Neg);
+                              BO->replaceAllUsesWith(Sub);
+                          }
+                          else if (BO->getOpcode() == Instruction::Sub) {
+                              Value *Neg = Builder.CreateNeg(BO->getOperand(1));
+                              Value *Add = Builder.CreateAdd(BO->getOperand(0), Neg);
+                              BO->replaceAllUsesWith(Add);
+                          }
+                          else if (BO->getOpcode() == Instruction::And) {
+                              Value *NotA = Builder.CreateNot(BO->getOperand(0));
+                              Value *NotB = Builder.CreateNot(BO->getOperand(1));
+                              Value *Or = Builder.CreateOr(NotA, NotB);
+                              Value *Not = Builder.CreateNot(Or);
+                              BO->replaceAllUsesWith(Not);
+                          }
+                          else if (BO->getOpcode() == Instruction::Or) {
+                              Value *NotA = Builder.CreateNot(BO->getOperand(0));
+                              Value *NotB = Builder.CreateNot(BO->getOperand(1));
+                              Value *And = Builder.CreateAnd(NotA, NotB);
+                              Value *Not = Builder.CreateNot(And);
+                              BO->replaceAllUsesWith(Not);
+                          }
+                          else if (BO->getOpcode() == Instruction::Xor) {
+                              Value *NotA = Builder.CreateNot(BO->getOperand(0));
+                              Value *NotB = Builder.CreateNot(BO->getOperand(1));
+                              Value *And1 = Builder.CreateAnd(NotA, BO->getOperand(1));
+                              Value *And2 = Builder.CreateAnd(BO->getOperand(0), NotB);
+                              Value *Or = Builder.CreateOr(And1, And2);
+                              BO->replaceAllUsesWith(Or);
                           }
                       }
                   }
               }
               return PreservedAnalyses::none();
           }
-          EOF
+          CPP
           
           # ==========================================
           # StringObfuscation.h
           # ==========================================
-          cat > llvm/include/llvm/Transforms/Obfuscation/StringObfuscation.h << 'EOF'
+          cat > llvm/include/llvm/Transforms/Obfuscation/StringObfuscation.h << 'HEADER'
           #ifndef LLVM_TRANSFORMS_OBFUSCATION_STRINGOBFUSCATION_H
           #define LLVM_TRANSFORMS_OBFUSCATION_STRINGOBFUSCATION_H
           #include "llvm/IR/PassManager.h"
@@ -310,14 +285,14 @@ jobs:
             PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
             static bool isRequired() { return true; }
           };
-          } // namespace llvm
+          }
           #endif
-          EOF
+          HEADER
           
           # ==========================================
           # StringObfuscation.cpp
           # ==========================================
-          cat > llvm/lib/Transforms/Obfuscation/StringObfuscation.cpp << 'EOF'
+          cat > llvm/lib/Transforms/Obfuscation/StringObfuscation.cpp << 'CPP'
           #include "llvm/Transforms/Obfuscation/StringObfuscation.h"
           #include "llvm/IR/Constants.h"
           #include "llvm/IR/GlobalVariable.h"
@@ -332,14 +307,18 @@ jobs:
               std::uniform_int_distribution<> keyDist(1, 255);
               
               for (GlobalVariable &GV : M.globals()) {
-                  if (!GV.hasInitializer()) continue;
-                  if (!GV.getInitializer()->getType()->isArrayTy()) continue;
+                  if (!GV.hasInitializer())
+                      continue;
+                  if (!GV.getInitializer()->getType()->isArrayTy())
+                      continue;
                   
                   ConstantDataArray *CDA = dyn_cast<ConstantDataArray>(GV.getInitializer());
-                  if (!CDA || !CDA->isString()) continue;
+                  if (!CDA || !CDA->isString())
+                      continue;
                   
                   StringRef Str = CDA->getAsString();
-                  if (Str.empty()) continue;
+                  if (Str.empty())
+                      continue;
                   
                   uint8_t Key = keyDist(gen);
                   std::string Encrypted(Str.size(), '\0');
@@ -351,19 +330,18 @@ jobs:
               }
               return PreservedAnalyses::none();
           }
-          EOF
+          CPP
           
-          echo "All OLLVM passes created"
+          echo "✅ All OLLVM passes created"
 
       # ============================================
-      # STEP 3: Register passes in LLVM build system
+      # STEP 3: Register passes in LLVM
       # ============================================
-      - name: Register OLLVM in LLVM build
+      - name: Register OLLVM passes in build system
         run: |
           cd llvm-project
           
-          # Create CMakeLists.txt for Obfuscation library
-          cat > llvm/lib/Transforms/Obfuscation/CMakeLists.txt << 'EOF'
+          cat > llvm/lib/Transforms/Obfuscation/CMakeLists.txt << 'CMAKE'
           add_llvm_component_library(LLVMObfuscation
             BogusControlFlow.cpp
             Flattening.cpp
@@ -375,71 +353,64 @@ jobs:
             Support
             TransformUtils
           )
-          EOF
+          CMAKE
           
-          # Add to parent CMakeLists.txt
           if ! grep -q "add_subdirectory(Obfuscation)" llvm/lib/Transforms/CMakeLists.txt; then
             echo "add_subdirectory(Obfuscation)" >> llvm/lib/Transforms/CMakeLists.txt
           fi
           
-          # Add to link dependencies
           if ! grep -q "LLVMObfuscation" llvm/lib/Passes/CMakeLists.txt; then
             sed -i 's/LLVMTransformUtils/LLVMTransformUtils\n  LLVMObfuscation/' llvm/lib/Passes/CMakeLists.txt
           fi
           
-          # Register passes in PassBuilder.cpp
           PASSBUILDER="llvm/lib/Passes/PassBuilder.cpp"
           
-          # Add includes
-          if ! grep -q "Obfuscation/BogusControlFlow.h" "$PASSBUILDER"; then
-            sed -i '/#include "llvm\/Transforms\/Scalar\/LICM.h"/a #include "llvm/Transforms/Obfuscation/BogusControlFlow.h"\n#include "llvm/Transforms/Obfuscation/Flattening.h"\n#include "llvm/Transforms/Obfuscation/Substitution.h"\n#include "llvm/Transforms/Obfuscation/StringObfuscation.h"' "$PASSBUILDER"
+          if ! grep -q "BogusControlFlow.h" "$PASSBUILDER"; then
+            sed -i '/#include "llvm\/Transforms\/Scalar\/LICM.h"/a\
+          #include "llvm/Transforms/Obfuscation/BogusControlFlow.h"\
+          #include "llvm/Transforms/Obfuscation/Flattening.h"\
+          #include "llvm/Transforms/Obfuscation/Substitution.h"\
+          #include "llvm/Transforms/Obfuscation/StringObfuscation.h"' "$PASSBUILDER"
           fi
           
-          # Register function passes (bcf, fla, sub)
           if ! grep -q '"bcf"' "$PASSBUILDER"; then
-            sed -i '/FUNCTION_PASS("loop-unroll", LoopUnrollPass())/a \ \ FUNCTION_PASS("bcf", BogusControlFlow())\n  FUNCTION_PASS("fla", Flattening())\n  FUNCTION_PASS("sub", Substitution())' "$PASSBUILDER"
+            sed -i '/FUNCTION_PASS("loop-unroll", LoopUnrollPass())/a\
+            \ \ FUNCTION_PASS("bcf", BogusControlFlow())\
+            \ \ FUNCTION_PASS("fla", Flattening())\
+            \ \ FUNCTION_PASS("sub", Substitution())' "$PASSBUILDER"
           fi
           
-          # Register module pass (sobf)
           if ! grep -q '"str-obf"' "$PASSBUILDER"; then
-            sed -i '/MODULE_PASS("verify", VerifierPass())/a \ \ MODULE_PASS("str-obf", StringObfuscation())' "$PASSBUILDER"
+            sed -i '/MODULE_PASS("verify", VerifierPass())/a\
+            \ \ MODULE_PASS("str-obf", StringObfuscation())' "$PASSBUILDER"
           fi
           
-          # Parse pipeline parsing for our passes
-          if ! grep -q '"bcf"' "$PASSBUILDER" && ! grep -q 'parsePassPipeline' "$PASSBUILDER"; then
-            # Add to pipeline parsing if needed
-            PIPELINE_REG="llvm/lib/Passes/PassRegistry.def"
-            echo 'FUNCTION_PASS("bcf", BogusControlFlow())' >> "$PIPELINE_REG"
-            echo 'FUNCTION_PASS("fla", Flattening())' >> "$PIPELINE_REG"
-            echo 'FUNCTION_PASS("sub", Substitution())' >> "$PIPELINE_REG"
-            echo 'MODULE_PASS("str-obf", StringObfuscation())' >> "$PIPELINE_REG"
-          fi
-          
-          echo "OLLVM passes registered in LLVM build system"
+          echo "✅ Passes registered in PassBuilder.cpp"
 
       # ============================================
-      # STEP 4: Cache build
+      # STEP 4: Cache LLVM build
       # ============================================
       - name: Cache LLVM build
         uses: actions/cache@v4
         with:
           path: llvm-project/build
-          key: ${{ runner.os }}-ollvm-fixed-v3-${{ hashFiles('llvm-project/llvm/CMakeLists.txt', 'llvm-project/llvm/lib/Passes/PassBuilder.cpp') }}
+          key: ${{ runner.os }}-ollvm-v5-${{ hashFiles('llvm-project/llvm/CMakeLists.txt', 'llvm-project/llvm/lib/Passes/PassBuilder.cpp') }}
           restore-keys: |
-            ${{ runner.os }}-ollvm-fixed-v3-
+            ${{ runner.os }}-ollvm-v5-
 
       # ============================================
-      # STEP 5: Install build tools
+      # STEP 5: Install dependencies
       # ============================================
       - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake python3
+          echo "✅ Build tools installed"
 
       # ============================================
-      # STEP 6: Configure and Build
+      # STEP 6: Configure build
       # ============================================
-      - name: Configure OLLVM
+      - name: Configure OLLVM build
         run: |
           mkdir -p llvm-project/build
           cd llvm-project/build
@@ -462,88 +433,108 @@ jobs:
             -DLLVM_USE_LINKER=gold \
             -DCMAKE_C_FLAGS="-O3" \
             -DCMAKE_CXX_FLAGS="-O3" \
-            -DLLVM_PARALLEL_COMPILE_JOBS=$(nproc) \
+            -DLLVM_PARALLEL_COMPILE_JOBS=4 \
             -DLLVM_PARALLEL_LINK_JOBS=2 \
             ../llvm
+          
+          echo "✅ CMake configuration complete"
 
+      # ============================================
+      # STEP 7: Build OLLVM
+      # ============================================
       - name: Build OLLVM
+        timeout-minutes: 180
         run: |
           cd llvm-project/build
-          ninja -j "$(nproc)" clang lld 2>&1 | tail -20
+          
+          echo "========================================="
+          echo "System Info:"
+          echo "CPU: $(nproc) cores"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo "Disk: $(df -h . | tail -1 | awk '{print $4}') available"
+          echo "========================================="
+          
+          JOBS=$(nproc)
+          if [ $JOBS -gt 4 ]; then
+            JOBS=4
+          fi
+          
+          echo "Building with $JOBS parallel jobs..."
+          echo "This will take 30-60 minutes..."
+          echo "========================================="
+          
+          ninja -j $JOBS clang lld 2>&1 | tee build.log
+          
+          echo "========================================="
+          echo "Checking build result..."
           
           if [ ! -f bin/clang ]; then
-            echo "ERROR: Build failed!"
+            echo "❌ ERROR: clang binary not found!"
+            echo "Build log last 50 lines:"
+            tail -50 build.log
             exit 1
           fi
           
-          # Test if passes are recognized
-          echo 'int main(){return 0;}' | ./bin/clang -x c - -mllvm -bcf -c -o /dev/null 2>&1
-          if [ $? -eq 0 ]; then
-            echo "✓ BCF pass working"
-          else
-            echo "! BCF pass may not be registered, but continuing..."
+          if grep -i "error:" build.log > /dev/null 2>&1; then
+            echo "❌ Build errors found:"
+            grep -i "error:" build.log | head -20
+            exit 1
           fi
           
-          echo "Build complete"
+          echo "✅ OLLVM built successfully!"
+          ./bin/clang --version
 
       # ============================================
-      # STEP 7: Download and integrate NDK r26d
+      # STEP 8: Download NDK r26d
       # ============================================
-      - name: Download NDK r26d
+      - name: Download Android NDK r26d
         run: |
-          curl -L --retry 3 --retry-delay 5 \
+          echo "Downloading NDK r26d..."
+          curl -L --retry 5 --retry-delay 10 \
             -o android-ndk-r26d-linux.zip \
             https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          
+          if [ ! -f android-ndk-r26d-linux.zip ]; then
+            echo "❌ NDK download failed!"
+            exit 1
+          fi
+          
           unzip -q android-ndk-r26d-linux.zip -d ndk
+          echo "✅ NDK downloaded"
+          ls -la ndk/android-ndk-r26d/
 
+      # ============================================
+      # STEP 9: Integrate OLLVM into NDK
+      # ============================================
       - name: Integrate OLLVM into NDK
         run: |
           BIN_DIR="ndk/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin"
           BUILD_BIN="llvm-project/build/bin"
           
-          # Backup originals
+          echo "Backing up original clang..."
           cp "$BIN_DIR/clang" "$BIN_DIR/clang.original"
           cp "$BIN_DIR/clang++" "$BIN_DIR/clang++.original"
           
-          # Replace main binaries
+          echo "Installing OLLVM clang..."
           cp -f "$BUILD_BIN/clang" "$BIN_DIR/clang"
           cp -f "$BUILD_BIN/clang++" "$BIN_DIR/clang++"
           
           cd "$BIN_DIR"
           
-          # Update all versioned symlinks
           rm -f clang-17 clang++-17
           ln -sf clang clang-17
           ln -sf clang++ clang++-17
           
-          # Update all target-specific wrappers
-          for wrapper in aarch64-linux-android*-clang* \
-                        armv7a-linux-androideabi*-clang* \
-                        i686-linux-android*-clang* \
-                        x86_64-linux-android*-clang*; do
-            if [ -f "$wrapper" ]; then
-              # These are usually scripts that call clang - replace if needed
-              # Most just need the underlying clang to be OLLVM
-              echo "Updated wrapper: $wrapper"
-            fi
-          done
+          echo "✅ OLLVM integrated into NDK"
           
-          # Fix lib/clang symlinks if needed
-          NDK_CLANG_DIR="ndk/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/lib/clang"
-          if [ -d "$NDK_CLANG_DIR" ]; then
-            # Ensure version matches
-            ls -la "$NDK_CLANG_DIR"
-          fi
-          
-          echo "OLLVM integrated into NDK"
-          
-          # Test integration
-          echo 'int main(){return 0;}' | ./clang -x c - -c -o /dev/null 2>&1 && echo "Integration OK" || echo "Integration FAILED"
+          echo "Verifying..."
+          ./clang --version 2>&1 | head -3
+          echo 'int main(){return 0;}' | ./clang -x c - -c -o /dev/null && echo "✓ Basic compilation works" || echo "✗ Compilation failed"
 
       # ============================================
-      # STEP 8: Verify all flags
+      # STEP 10: Test all flags
       # ============================================
-      - name: Verify obfuscation flags
+      - name: Test obfuscation flags
         run: |
           BIN="ndk/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
           
@@ -557,51 +548,67 @@ jobs:
           int main() { return verify("test"); }
           EOF
           
-          echo "=== Testing OLLVM flags ==="
+          echo "========================================="
+          echo "Testing all OLLVM flags..."
+          echo "========================================="
           
-          tests=(
-            "-mllvm -bcf -mllvm -bcf_prob=90"
-            "-mllvm -fla"
-            "-mllvm -sub -mllvm -sub_loop=5"
-            "-mllvm -str-obf"
-            "-mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90 -mllvm -fla -mllvm -sub -mllvm -sub_loop=5 -mllvm -str-obf"
-          )
+          echo -n "BCF:  "
+          $BIN -target aarch64-linux-android21 -mllvm -bcf -mllvm -bcf_prob=90 -O2 -c test.c -o /dev/null 2>&1 && echo "✓ Working" || echo "✗ Failed"
           
-          for t in "${tests[@]}"; do
-            echo -n "Testing: $t ... "
-            if $BIN -target aarch64-linux-android21 $t -O2 -c test.c -o /dev/null 2>&1; then
-              echo "✓"
-            else
-              echo "✗ (may work at runtime)"
-            fi
-          done
+          echo -n "FLA:  "
+          $BIN -target aarch64-linux-android21 -mllvm -fla -O2 -c test.c -o /dev/null 2>&1 && echo "✓ Working" || echo "✗ Failed"
           
-          echo "=== Verification complete ==="
+          echo -n "SUB:  "
+          $BIN -target aarch64-linux-android21 -mllvm -sub -mllvm -sub_loop=5 -O2 -c test.c -o /dev/null 2>&1 && echo "✓ Working" || echo "✗ Failed"
+          
+          echo -n "SOBF: "
+          $BIN -target aarch64-linux-android21 -mllvm -str-obf -O2 -c test.c -o /dev/null 2>&1 && echo "✓ Working" || echo "✗ Failed"
+          
+          echo -n "ALL:  "
+          $BIN -target aarch64-linux-android21 \
+            -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90 \
+            -mllvm -fla \
+            -mllvm -sub -mllvm -sub_loop=5 \
+            -mllvm -str-obf \
+            -O2 -c test.c -o /dev/null 2>&1 && echo "✓ Working" || echo "✗ Failed"
+          
+          echo "========================================="
+          echo "✅ Flag testing complete"
+          echo "========================================="
 
       # ============================================
-      # STEP 9: Create build templates
+      # STEP 11: Create build templates
       # ============================================
-      - name: Create templates
+      - name: Create build templates
         run: |
           mkdir -p ndk/templates
           
           cat > ndk/templates/CMakeLists.txt << 'CMAKE'
           cmake_minimum_required(VERSION 3.22.1)
           project("protected_app")
-          
+
           set(OLLVM_FLAGS
-              -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90
+              -mllvm -bcf
+              -mllvm -bcf_loop=3
+              -mllvm -bcf_prob=90
               -mllvm -fla
-              -mllvm -sub -mllvm -sub_loop=5
+              -mllvm -sub
+              -mllvm -sub_loop=5
               -mllvm -str-obf
               -fno-inline
               -fvisibility=hidden
               -fno-stack-protector
+              -fomit-frame-pointer
           )
-          
+
           add_library(native-lib SHARED native-lib.cpp)
           target_compile_options(native-lib PRIVATE ${OLLVM_FLAGS})
-          target_link_options(native-lib PRIVATE -Wl,--strip-all -Wl,-z,now -Wl,-z,relro)
+          target_link_options(native-lib PRIVATE 
+              -Wl,--strip-all
+              -Wl,-z,now
+              -Wl,-z,relro
+              -Wl,--gc-sections
+          )
           target_link_libraries(native-lib log android)
           CMAKE
           
@@ -612,7 +619,7 @@ jobs:
           LOCAL_SRC_FILES := native-lib.cpp
           LOCAL_CFLAGS += -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=90
           LOCAL_CFLAGS += -mllvm -fla -mllvm -sub -mllvm -sub_loop=5 -mllvm -str-obf
-          LOCAL_CFLAGS += -fno-inline -fvisibility=hidden
+          LOCAL_CFLAGS += -fno-inline -fvisibility=hidden -fno-stack-protector
           LOCAL_LDFLAGS += -Wl,--strip-all -Wl,-z,now -Wl,-z,relro
           LOCAL_LDLIBS := -llog -landroid
           include $(BUILD_SHARED_LIBRARY)
@@ -620,75 +627,116 @@ jobs:
           
           cat > ndk/templates/build_protected.bat << 'BAT'
           @echo off
-          echo ========================================
+          echo ==========================================
           echo OLLVM MAXIMUM PROTECTION BUILD
-          echo ========================================
+          echo ==========================================
           set NDK_PATH=%~dp0..\
           rmdir /s /q obj libs 2>nul
           for %%A in (arm64-v8a armeabi-v7a x86_64) do (
+              echo.
               echo Building %%A...
               %NDK_PATH%\ndk-build.cmd NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=%%A APP_PLATFORM=android-21 -j%NUMBER_OF_PROCESSORS%
-              if errorlevel 1 exit /b 1
+              if errorlevel 1 (
+                  echo BUILD FAILED!
+                  exit /b 1
+              )
           )
-          echo ========================================
+          echo.
+          echo ==========================================
           echo BUILD COMPLETE
-          echo ========================================
+          echo ==========================================
           pause
           BAT
           
           cat > ndk/templates/build_protected.sh << 'SH'
           #!/bin/bash
           set -e
-          echo "========================================"
+          echo "========================================="
           echo "OLLVM MAXIMUM PROTECTION BUILD"
-          echo "========================================"
+          echo "========================================="
           NDK_PATH="$(dirname "$0")/.."
           rm -rf obj libs
           for ABI in arm64-v8a armeabi-v7a x86_64; do
+              echo ""
               echo "Building $ABI..."
               "$NDK_PATH/ndk-build" NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_ABI=$ABI APP_PLATFORM=android-21 -j$(nproc)
           done
-          echo "========================================"
+          echo ""
+          echo "========================================="
           echo "BUILD COMPLETE"
-          echo "========================================"
+          echo "========================================="
           SH
           chmod +x ndk/templates/build_protected.sh
           
-          echo "Templates created"
+          echo "✅ Build templates created"
 
       # ============================================
-      # STEP 10: Package and upload
+      # STEP 12: Package NDK
       # ============================================
-      - name: Package NDK
+      - name: Package OLLVM NDK
         run: |
           cd ndk
           zip -r ../android-ndk-r26d-ollvm.zip android-ndk-r26d
-          echo "Package size: $(ls -lh ../android-ndk-r26d-ollvm.zip | awk '{print $5}')"
+          cd ..
+          echo "========================================="
+          echo "Package created:"
+          ls -lh android-ndk-r26d-ollvm.zip
+          echo "========================================="
 
-      - name: Upload NDK artifact
+      # ============================================
+      # STEP 13: Upload artifacts
+      # ============================================
+      - name: Upload OLLVM NDK
         uses: actions/upload-artifact@v4
         with:
           name: android-ndk-r26d-ollvm
           path: android-ndk-r26d-ollvm.zip
           retention-days: 90
 
-      - name: Upload templates
+      - name: Upload build templates
         uses: actions/upload-artifact@v4
         with:
           name: ollvm-build-templates
           path: ndk/templates/
           retention-days: 90
 
-      - name: Summary
+      # ============================================
+      # STEP 14: Summary
+      # ============================================
+      - name: Print summary
         run: |
-          echo "╔══════════════════════════════════════════════╗"
-          echo "║  ✅ OLLVM NDK r26d BUILD SUCCESSFUL         ║"
-          echo "╠══════════════════════════════════════════════╣"
-          echo "║  Flags available:                           ║"
-          echo "║  -mllvm -bcf    (Bogus Control Flow)        ║"
-          echo "║  -mllvm -fla    (Flattening)                ║"
-          echo "║  -mllvm -sub    (Substitution)              ║"
-          echo "║  -mllvm -str-obf (String Obfuscation)       ║"
-          echo "╠══════════════════════════════════════════════╣"
-          echo "║  Download artifact from Actions tab         ║"
-          echo "╚══════════════════════════════════════════════╝"
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║                                                      ║"
+          echo "║     ✅ OLLVM NDK r26d BUILD SUCCESSFUL!              ║"
+          echo "║                                                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  Available OLLVM Flags:                              ║"
+          echo "║  • -mllvm -bcf         Bogus Control Flow           ║"
+          echo "║  • -mllvm -bcf_loop=3  BCF iterations               ║"
+          echo "║  • -mllvm -bcf_prob=90 BCF probability              ║"
+          echo "║  • -mllvm -fla         Control Flow Flattening      ║"
+          echo "║  • -mllvm -sub         Instruction Substitution     ║"
+          echo "║  • -mllvm -sub_loop=5  SUB iterations               ║"
+          echo "║  • -mllvm -str-obf     String Obfuscation           ║"
+          echo "║                                                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  Android Studio Setup:                               ║"
+          echo "║  1. Download android-ndk-r26d-ollvm.zip             ║"
+          echo "║  2. Extract to a permanent location                  ║"
+          echo "║  3. Add to local.properties:                        ║"
+          echo "║     ndk.dir=<path>/android-ndk-r26d                 ║"
+          echo "║  4. Copy templates/CMakeLists.txt to your project   ║"
+          echo "║  5. Build APK normally                               ║"
+          echo "║                                                      ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  Standalone Build:                                   ║"
+          echo "║  Windows: templates/build_protected.bat             ║"
+          echo "║  Linux:   templates/build_protected.sh              ║"
+          echo "║  macOS:   templates/build_protected.sh              ║"
+          echo "║                                                      ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          echo ""
